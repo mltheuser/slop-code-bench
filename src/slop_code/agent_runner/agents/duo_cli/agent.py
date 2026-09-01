@@ -52,6 +52,13 @@ _TOOL_STARTED_MARKER = "[RunController] Tool started:"
 # Keep accumulated stderr bounded; the interesting part is the tail.
 _MAX_STDERR_BYTES = 4 * 1024 * 1024
 
+# The session id also appears in the stderr log stream, seconds into the run
+# and long before the result document is written, e.g.
+#   [DuoWorkflowNodeExecutor][6832711] Executor started
+# Reading it from here means a retry can resume the session even when the run
+# ends without a parseable result document (killed mid-run, truncated stdout).
+_SESSION_ID_PATTERN = re.compile(r"\[DuoWorkflowNodeExecutor\]\[(\d+)\]")
+
 
 class DuoCliConfig(AgentConfigBase, agent_type="duo_cli"):
     """Configuration for the GitLab Duo CLI agent.
@@ -185,6 +192,49 @@ class DuoCliAgent(Agent):
             raise AgentError(f"Container exec yielded no result: {command}")
         return result
 
+    def _observe_session_id(self, text: str) -> None:
+        """Record the session id seen in a chunk of the stderr log stream.
+
+        The id is stable for the lifetime of one `duo run`, so the first match
+        wins and later chunks are ignored.
+
+        Args:
+            text: A chunk of stderr output from the running CLI.
+        """
+        if self._resume_session_id is not None:
+            return
+        match = _SESSION_ID_PATTERN.search(text)
+        if match:
+            self._resume_session_id = match.group(1)
+            self.log.debug(
+                "agent.duo_cli.session_observed",
+                session_id=self._resume_session_id,
+            )
+
+    def retry(self) -> None:
+        """Continue the current checkpoint after a failed run.
+
+        Resuming requires a session id. Without one the CLI would start a
+        blank session, and the retry prompt alone ("Continue from where you
+        left off.") carries no task, leaving the agent to guess at a workspace
+        it has no memory of. Failing loudly is better than burning a
+        checkpoint on that.
+
+        Raises:
+            AgentError: If no session id was observed for the failed run.
+        """
+        if not self._resume_session_id:
+            raise AgentError(
+                "Cannot retry duo run: no session id was observed for the "
+                "failed run, so the retry would start a fresh session with "
+                "no task context."
+            )
+        self.log.info(
+            "agent.duo_cli.retry",
+            session_id=self._resume_session_id,
+        )
+        super().retry()
+
     def run(self, task: str) -> None:
         if self._runtime is None:
             raise AgentError("Duo agent has not been set up with a runtime")
@@ -206,12 +256,16 @@ class DuoCliAgent(Agent):
                     stderr_parts.append(event.text)
                     stderr_bytes += len(event.text)
                 self.usage.steps += event.text.count(_TOOL_STARTED_MARKER)
+                self._observe_session_id(event.text)
             elif event.kind == "finished":
                 result = event.result
         if result is None:
             raise AgentError("duo run yielded no result")
 
         stderr_text = "".join(stderr_parts) or result.stderr
+        # Late safety net: with a truncated stderr stream the id may only be
+        # in the buffered copy.
+        self._observe_session_id(stderr_text)
         stdout_text = result.stdout.strip()
         self._runs.append((stdout_text, stderr_text))
 
@@ -224,7 +278,9 @@ class DuoCliAgent(Agent):
             document = json.loads(stdout_text)
         except json.JSONDecodeError as exc:
             raise AgentError(
-                f"duo run stdout is not valid JSON: {stdout_text[-500:]}"
+                f"duo run stdout is not valid JSON "
+                f"({len(stdout_text)} chars, exit {result.exit_code}): "
+                f"{stdout_text[-500:]}"
             ) from exc
 
         session_id = document.get("sessionId")
