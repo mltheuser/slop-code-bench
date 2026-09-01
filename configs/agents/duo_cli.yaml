@@ -1,0 +1,10 @@
+type: duo_cli
+version: "9.17.0"
+gitlab_url: https://gitlab.com
+gitlab_token_env: GITLAB_TOKEN
+# The Duo CLI emits no token usage or cost, and turn limits are enforced
+# server-side by the flow — the benchmark imposes no limits of its own.
+cost_limits:
+  cost_limit: 0
+  step_limit: 0
+  net_cost_limit: 0

@@ -13,6 +13,8 @@ from slop_code.agent_runner.agents.codex import CodexAgent
 from slop_code.agent_runner.agents.codex import CodexConfig
 from slop_code.agent_runner.agents.cursor_cli import CursorCliAgent
 from slop_code.agent_runner.agents.cursor_cli import CursorCliConfig
+from slop_code.agent_runner.agents.duo_cli import DuoCliAgent
+from slop_code.agent_runner.agents.duo_cli import DuoCliConfig
 from slop_code.agent_runner.agents.gemini import GeminiAgent
 from slop_code.agent_runner.agents.gemini import GeminiConfig
 from slop_code.agent_runner.agents.kimi_cli import KimiCliAgent
@@ -49,6 +51,8 @@ __all__ = [
     "GeminiConfig",
     "KimiCliAgent",
     "KimiCliConfig",
+    "DuoCliAgent",
+    "DuoCliConfig",
     "MomoAgent",
     "MomoConfig",
     "OpenCodeAgentConfig",

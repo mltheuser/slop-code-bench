@@ -1,0 +1,13 @@
+FROM {{ base_image }}
+
+# The Duo CLI ships as a self-contained Bun single-file executable in the
+# gitlab-lsp project's generic package registry — no Node.js required.
+RUN arch="$(dpkg --print-architecture)" && case "$arch" in \
+      arm64) target=duo-linux-arm64 ;; \
+      amd64) target=duo-linux-x64 ;; \
+      *) echo "unsupported architecture: $arch" >&2; exit 1 ;; \
+    esac \
+ && curl -fsSL -o /usr/local/bin/duo \
+      "https://gitlab.com/api/v4/projects/46519181/packages/generic/duo-cli/{{ version }}/$target" \
+ && chmod +x /usr/local/bin/duo \
+ && duo --version
