@@ -24,10 +24,16 @@ uv run slop-code sync
 ```
 
 Both `DOCKER_HOST` and `TMPDIR` are needed on **every** invocation, not just
-setup. Forgetting `TMPDIR` produces a particularly nasty silent failure:
-agent-side bind mounts arrive empty, the agent crashes instantly, and the
-harness records a "successful" 0-step run — always check that `steps` and
-(for momo) `cost` are non-zero.
+setup. `/tmp` and `/var/folders` are not shared into the colima VM, so a bind
+mount rooted there is created inside the VM instead: the container writes
+succeed, and the host sees an empty directory. For `momo`, whose usage
+tracking and artifacts are read back from a mounted data dir, this means no
+events are ever ingested — the run fails with
+`momo run ended without a run_finished event` and the checkpoint is recorded
+as an agent error (`state: error`).
+
+Sanity check after any run: `steps` and (for momo) `cost` should be non-zero
+in `run_info.yaml`. Zero for both usually means the mount was invisible.
 
 ## Running momo
 
@@ -64,6 +70,22 @@ uv run slop-code run --agent momo --model anthropic/sonnet-5 \
   --prompt configs/prompts/just-solve.jinja \
   --problem file_backup
 ```
+
+**Truncated runs are scored, not retried.** A momo run can end without
+answering: `turns_exhausted` (256 turns), `timeout` (3-day wall clock) or
+`stopped`. The harness keeps whatever the agent built and scores it, rather
+than retrying — a retry resumes the session with a *fresh* per-run turn
+budget, which would quietly grant several times the intended allowance and
+make runs incomparable. Such runs are flagged in
+`<checkpoint>/agent/incomplete_runs.json`; if that file exists, read the
+score as "the agent was cut off", not "the model wrote weak code".
+
+**Wedged runs are abandoned.** `run_idle_timeout` (default 1h, in
+`configs/agents/momo.yaml`) aborts a run that keeps reporting `running`
+while writing no events at all. It is not a runtime budget — any new event
+resets the window, so long tool calls are safe — it only stops a dead run
+from pinning a worker for the rest of the benchmark. Set it to `0` to
+disable.
 
 **Known gotcha (accepted deliberately, 2026-09-01):** a momo run lives in
 the container and merely gets *observed* by the harness — if the harness

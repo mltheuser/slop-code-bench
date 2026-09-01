@@ -5,6 +5,10 @@ harness_path: /Users/malteheuser/Develop/Private/momo-codes/momo-agent/lib/examp
 ai_router_base_url: http://host.docker.internal:8787
 # Per the momo-codes run-budget decision: the agent runs until its own
 # library budgets end it; the benchmark imposes no step or cost limits.
+# run_idle_timeout is not a budget: it only aborts a run that reports
+# "running" while emitting no events at all, which would otherwise pin a
+# worker for the rest of the benchmark. Set to 0 to disable.
+run_idle_timeout: 3600.0
 cost_limits:
   cost_limit: 0
   step_limit: 0

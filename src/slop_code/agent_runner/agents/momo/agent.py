@@ -66,6 +66,13 @@ class MomoConfig(AgentConfigBase, agent_type="momo"):
         ai_router_base_url: ai-router URL as seen from inside the container.
         poll_interval: Seconds between session-status polls during a run.
         startup_timeout: Seconds to wait for the server to become ready.
+        run_idle_timeout: Abort a run that reports ``running`` while writing
+            no new events for this many seconds. This is an inactivity bound,
+            not a total-runtime budget: momo's own wall clock (3 days by
+            default) governs how long legitimate work may take, so bounding
+            total time here would cut healthy long runs short. It exists to
+            catch a wedged run that would otherwise pin a worker forever.
+            0 disables the bound.
     """
 
     type: Literal["momo"] = "momo"
@@ -75,6 +82,9 @@ class MomoConfig(AgentConfigBase, agent_type="momo"):
     ai_router_base_url: str = "http://host.docker.internal:8787"
     poll_interval: float = 3.0
     startup_timeout: float = 60.0
+    # Generous: a single tool call may legitimately run for a long time
+    # (momo's own tool timeout is 24h) without emitting any event.
+    run_idle_timeout: float = 3600.0
 
 
 class MomoAgent(Agent):
@@ -103,6 +113,10 @@ class MomoAgent(Agent):
         # Byte offsets per host events.jsonl path, for incremental parsing.
         self._event_offsets: dict[Path, int] = {}
         self._last_run_finished: dict[str, Any] | None = None
+        # Terminal statuses of runs that ended without answering, in order.
+        # Surfaced via save_artifacts() so a truncated run is visible after
+        # the fact rather than only in the live log.
+        self._incomplete_runs: list[str] = []
 
     @classmethod
     def _from_config(
@@ -322,10 +336,23 @@ class MomoAgent(Agent):
                 f"momo run failed: {error.get('message', 'unknown error')}"
             )
         if run_status != "completed":
+            # The agent was cut off before it answered. This is NOT raised as
+            # an error on purpose: 'turns_exhausted' and 'timeout' are momo's
+            # own budgets doing their job, and the harness retry would resume
+            # the session with a *fresh* per-run budget (turnsUsed counts per
+            # run), quietly granting up to 3x the intended allowance and
+            # making runs incomparable. The partial work stands and is
+            # scored as-is; the marker below is what tells a reader that the
+            # score reflects a truncated run rather than a finished one.
+            self._incomplete_runs.append(str(run_status))
             self.log.warning(
                 "momo run ended without completing",
                 run_status=run_status,
                 turns_used=finished.get("turnsUsed"),
+                note=(
+                    "scored as a truncated attempt; not retried because a "
+                    "retry would reset momo's per-run budget"
+                ),
             )
         self.log.debug(
             "momo run finished",
@@ -336,10 +363,36 @@ class MomoAgent(Agent):
         )
 
     def _poll_until_run_ends(self) -> None:
+        """Block until the momo session leaves the ``running`` state.
+
+        Raises:
+            AgentError: On repeated transport failures, an unusable
+                status response, or if the run wedges (see
+                ``run_idle_timeout``).
+        """
         consecutive_failures = 0
+        idle_limit = self.config.run_idle_timeout
+        last_progress = time.monotonic()
+        progress_marker = self._progress_marker()
         while True:
             time.sleep(self.config.poll_interval)
             self._ingest_new_events()
+
+            # Any new event byte counts as progress. A run that keeps
+            # reporting "running" while writing nothing at all is wedged;
+            # without this the loop would poll forever and pin the worker.
+            marker = self._progress_marker()
+            if marker != progress_marker:
+                progress_marker = marker
+                last_progress = time.monotonic()
+            elif (
+                idle_limit > 0
+                and time.monotonic() - last_progress > idle_limit
+            ):
+                raise AgentError(
+                    f"momo run produced no events for {idle_limit:.0f}s while "
+                    f"still reporting 'running'; treating it as wedged"
+                )
             try:
                 status, info = self._api(
                     "GET",
@@ -357,8 +410,28 @@ class MomoAgent(Agent):
                     f"Polling the momo session failed with HTTP {status}: "
                     f"{info}"
                 )
+            # A healthy server always answers with a status-bearing object.
+            # Anything else (proxy error page, truncated body) must surface
+            # as an AgentError, not as a TypeError/KeyError escaping as a
+            # non-agent crash.
+            if not isinstance(info, dict) or "status" not in info:
+                raise AgentError(
+                    f"Unexpected momo session payload while polling: "
+                    f"{str(info)[:200]}"
+                )
             if info["status"] != "running":
                 return
+
+    def _progress_marker(self) -> tuple[int, int]:
+        """Cheap liveness signal: how much event data has been consumed.
+
+        Returns:
+            (number of event files seen, total bytes consumed across them).
+        """
+        return (
+            len(self._event_offsets),
+            sum(self._event_offsets.values()),
+        )
 
     def _ingest_new_events(self) -> None:
         """Parse new event-log lines from every momo session (subagents too)."""
@@ -426,12 +499,20 @@ class MomoAgent(Agent):
                 )
             self._momo_session_id = None
         self._last_run_finished = None
+        self._incomplete_runs = []
         self._create_momo_session()
 
     def save_artifacts(self, path: Path) -> None:
+        path.mkdir(parents=True, exist_ok=True)
+        if self._incomplete_runs:
+            # A run that never answered still produces a snapshot that gets
+            # scored. Record it next to the logs so the resulting score can
+            # be read as "truncated attempt", not "the model did poorly".
+            (path / "incomplete_runs.json").write_text(
+                json.dumps({"statuses": self._incomplete_runs}, indent=2)
+            )
         if self._data_tmp is None:
             return
-        path.mkdir(parents=True, exist_ok=True)
         data_dir = Path(self._data_tmp.name)
         for log_file in data_dir.glob("*.log"):
             shutil.copy2(log_file, path / log_file.name)
