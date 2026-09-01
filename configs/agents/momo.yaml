@@ -1,0 +1,11 @@
+type: momo
+version: "0.1"
+server_dist: /Users/malteheuser/Develop/Private/momo-codes/momo-agent/server/build/install/server
+harness_path: /Users/malteheuser/Develop/Private/momo-codes/momo-agent/lib/examples/coder
+ai_router_base_url: http://host.docker.internal:8787
+# Per the momo-codes run-budget decision: the agent runs until its own
+# library budgets end it; the benchmark imposes no step or cost limits.
+cost_limits:
+  cost_limit: 0
+  step_limit: 0
+  net_cost_limit: 0
