@@ -282,3 +282,90 @@ class TestSaveResults:
         # Verify checkpoint has error state
         assert result["summary"]["checkpoints"]["checkpoint_1"] == "error"
         assert result["summary"]["error_type"] == "RuntimeError"
+
+    def test_agent_failure_is_distinguishable_from_failing_solution(
+        self, tmp_path: Path
+    ) -> None:
+        """Two very different outcomes must not look alike in the report.
+
+        Both end with passed_policy=False, but they mean opposite things:
+
+        * agent broke (crash, retries exhausted) -> the measurement is void
+        * agent finished, its code fails tests   -> a valid low score
+
+        Conflating them would silently turn harness failures into bad scores.
+        """
+
+        def build(
+            *, had_error: bool, state: AgentStateEnum, error_type: str | None
+        ) -> dict:
+            checkpoint_1 = Mock()
+            checkpoint_1.checkpoint_name = "checkpoint_1"
+            checkpoint_1.passed_policy = True
+            checkpoint_1.had_error = False
+
+            checkpoint_2 = Mock()
+            checkpoint_2.checkpoint_name = "checkpoint_2"
+            checkpoint_2.passed_policy = False
+            checkpoint_2.had_error = had_error
+
+            metrics_tracker = Mock()
+            metrics_tracker.state = state
+            metrics_tracker.usage = _make_usage_tracker(cost=1.0, steps=5)
+            metrics_tracker.started = datetime.now()
+            metrics_tracker.error_type = error_type
+            metrics_tracker.error_message = (
+                "Cannot retry duo run: no session id was observed"
+                if error_type
+                else None
+            )
+            metrics_tracker.error_traceback = "..." if error_type else None
+
+            run_spec = Mock()
+            run_spec.problem.checkpoints = {
+                "checkpoint_1": Mock(),
+                "checkpoint_2": Mock(),
+                "checkpoint_3": Mock(),
+            }
+            run_spec.model_dump.return_value = {
+                "environment": {},
+                "problem": {},
+            }
+            run_spec.skip_evaluation = False
+            run_spec.pass_policy = PassPolicy.ANY
+
+            return save_results(
+                results=[checkpoint_1, checkpoint_2],
+                metrics_tracker=metrics_tracker,
+                run_spec=run_spec,
+                output_path=tmp_path,
+            )["summary"]
+
+        agent_error = build(
+            had_error=True,
+            state=AgentStateEnum.ERROR,
+            error_type="AgentRunnerError",
+        )
+        bad_solution = build(
+            had_error=False,
+            state=AgentStateEnum.FAILED,
+            error_type=None,
+        )
+
+        # Neither passes, so passed_policy alone cannot tell them apart.
+        assert agent_error["passed_policy"] is False
+        assert bad_solution["passed_policy"] is False
+
+        # The run state does.
+        assert agent_error["state"] == AgentStateEnum.ERROR.value
+        assert bad_solution["state"] == AgentStateEnum.FAILED.value
+
+        # So does the per-checkpoint state.
+        assert agent_error["checkpoints"]["checkpoint_2"] == "error"
+        assert bad_solution["checkpoints"]["checkpoint_2"] == "ran"
+
+        # And only the agent failure carries a diagnosable cause.
+        assert agent_error["error_type"] == "AgentRunnerError"
+        assert "no session id" in agent_error["error_message"]
+        assert bad_solution["error_type"] is None
+        assert bad_solution["error_message"] is None
