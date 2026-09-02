@@ -585,3 +585,63 @@ class TestLocalStreamingRuntimeDemuxedStream:
                 break  # Just test one iteration
         finally:
             runtime.cleanup()
+
+
+class TestLocalStreamingBackgroundChild:
+    """Backgrounded children must not stall the foreground command.
+
+    Agents start servers with `nohup ... &`. Reading the pipe with a blocking
+    read(n) would wait for EOF, which only comes once that child also exits.
+    """
+
+    def test_returns_promptly_when_child_inherits_pipe(
+        self, local_spec: LocalEnvironmentSpec, tmp_path: Path
+    ) -> None:
+        import time
+
+        runtime = LocalStreamingRuntime(
+            environment=local_spec, working_dir=tmp_path
+        )
+        started = time.monotonic()
+        try:
+            result = None
+            for event in runtime.stream(
+                "sh -c 'sleep 60 & echo started'", env={}, timeout=None
+            ):
+                if event.kind == "finished":
+                    result = event.result
+        finally:
+            runtime.cleanup()
+        elapsed = time.monotonic() - started
+
+        assert result is not None
+        assert result.stdout.strip() == "started"
+        assert elapsed < 30.0
+
+    def test_preserves_multibyte_characters_split_across_chunks(
+        self, local_spec: LocalEnvironmentSpec, tmp_path: Path
+    ) -> None:
+        """A character straddling a read boundary is not corrupted.
+
+        '\u20ac' is 3 bytes and the read size is a power of two, so some
+        character is guaranteed to be split between two chunks.
+        """
+        count = 100_000
+        runtime = LocalStreamingRuntime(
+            environment=local_spec, working_dir=tmp_path
+        )
+        try:
+            result = None
+            for event in runtime.stream(
+                f"python3 -c \"import sys; sys.stdout.write('\u20ac'*{count})\"",
+                env={},
+                timeout=120,
+            ):
+                if event.kind == "finished":
+                    result = event.result
+        finally:
+            runtime.cleanup()
+
+        assert result is not None
+        assert result.stdout == "\u20ac" * count
+        assert "\ufffd" not in result.stdout

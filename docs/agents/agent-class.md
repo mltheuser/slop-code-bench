@@ -439,6 +439,50 @@ def run_checkpoint(self, task: str) -> CheckpointInferenceResult:
     )
 ```
 
+### `retry()`
+
+`run_checkpoint()` retries a failed run up to `cost_limits.max_retries` times
+(default 2) **within the same checkpoint**. A retry is a *continuation*, not a
+fresh attempt: the base implementation sends `RETRY_PROMPT`
+("Continue from where you left off.") and nothing else.
+
+```python
+def retry(self) -> None:
+    """Continue after a failed agent run."""
+    self.run(RETRY_PROMPT)
+```
+
+That prompt contains no task description, so it is only meaningful inside the
+conversation that just failed. Agents wrapping a resumable CLI **must**
+override `retry()` to resume the failed session explicitly (`--resume`,
+`--existing-session-id`, or equivalent).
+
+**If the session cannot be resumed, raise `AgentError` instead of starting a
+fresh one.** A blank session given only "Continue from where you left off."
+does not know what the task was, yet it sees a workspace full of partial work.
+It will confidently do something unrelated, and because the run *succeeds*,
+the damage is silent: the checkpoint is scored as a normal attempt. Failing
+the checkpoint is the better outcome, and it is visible in `infer.log`.
+
+Session identifiers should be captured as early as possible — ideally from the
+CLI's log stream while it runs, rather than from its final result document.
+A run that is killed or whose output is truncated still needs to be resumable,
+and that is exactly the case where the result document is unavailable.
+
+### Timeouts and run-ending limits
+
+`StreamingRuntime.stream(..., timeout=None)` means **no deadline at all**.
+Agent runs are passed `None` on purpose: the harness has no principled upper
+bound for how long a model may legitimately work, and killing a run mid-flight
+records a truncated result that is indistinguishable from the agent's own
+output. Pass a number only for bounded control-plane calls (a health probe, a
+version check), never for the run itself.
+
+`cost_limits` (`step_limit`, `cost_limit`, `net_cost_limit`) all treat `0` as
+"no limit". Agents whose underlying tool enforces its own budgets should ship
+zeros rather than duplicating the bound in the harness, where it can only
+truncate a run the tool would have allowed to finish.
+
 ### `finish_checkpoint()`
 
 Reset state and accumulate cost:
@@ -493,33 +537,41 @@ Agents maintain different types of state with different lifetimes:
 
 | State Type | Persists Across Checkpoints? | Reset By |
 |------------|------------------------------|----------|
-| Conversation history | Conditional* | `reset()` if `reset_context=True` |
+| Conversation history | No* | `reset()` between checkpoints |
 | Working directory | Yes | Managed by Session/Workspace |
 | `prior_cost` | Yes | Never (accumulates) |
 | `usage` tracker | No | `finish_checkpoint()` creates new tracker |
 | Custom agent state | Depends** | Agent's `reset()` implementation |
 
-*Depends on `reset_context` flag (set per run, not per agent)
+*The runner always resets it; see below.
 **Depends on agent implementation
 
 ### The reset_context Flag
 
-Configured at runtime (not in agent config):
+Every checkpoint starts a **fresh conversation**. Before each checkpoint after
+the first, `AgentRunner._setup_for_checkpoint()` calls:
 
 ```python
-# In runner configuration
-reset_context = False  # Default: maintain state
+self.agent.finish_checkpoint(reset_context=True)  # hardcoded
 ```
 
-**When `reset_context=False` (default):**
-- Conversation history preserved
-- Agent can reference prior checkpoint context
-- More "human-like" continuation
+which invokes the agent's `reset()`. The flag is a parameter of
+`finish_checkpoint()`, not a configuration option: nothing in `configs/` can
+turn it off, and no caller passes `False`.
 
-**When `reset_context=True`:**
-- `reset()` called between checkpoints
-- Fresh conversation each checkpoint
-- Prevents context pollution
+This is deliberate. Checkpoint specs are cumulative, so a single conversation
+spanning all of them would grow without bound and eventually exceed the model's
+context window on longer problems.
+
+What carries over between checkpoints is the **workspace**, not the
+conversation: the container and its files persist, so the agent re-reads its
+own code from disk each time. Prompts reflect this through the
+`is_continuation` template variable, which switches the boilerplate from
+"Use a virtual environment..." to "Keep using the same virtual environment
+you started with...".
+
+Note that conversation state *is* preserved across a `retry()` **within** one
+checkpoint: a retry resumes the failed run rather than starting over.
 
 ### Implementing reset()
 

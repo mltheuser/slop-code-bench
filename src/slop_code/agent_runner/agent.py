@@ -348,7 +348,20 @@ class Agent(ABC):
         """
 
     def retry(self) -> None:
-        """Continue after a failed agent run."""
+        """Continue after a failed agent run.
+
+        ``RETRY_PROMPT`` carries no task description: it only makes sense as a
+        follow-up message in the conversation that just failed. Implementations
+        that talk to a resumable CLI must therefore resume the failed session
+        explicitly. If the session cannot be resumed (for example because the
+        run died before its id was known), raise ``AgentError`` instead of
+        starting a fresh one: a blank session prompted with "Continue from
+        where you left off." has no idea what the task was, and silently
+        produces a checkpoint's worth of misdirected work.
+
+        Raises:
+            AgentError: If the failed run cannot be resumed.
+        """
         self.run(RETRY_PROMPT)
 
     @abstractmethod

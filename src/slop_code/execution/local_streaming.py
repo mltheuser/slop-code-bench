@@ -6,12 +6,13 @@ streaming output, suitable for agent development and testing.
 
 from __future__ import annotations
 
+import codecs
 import selectors
 import shlex
 import subprocess
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import Field
 
@@ -40,6 +41,60 @@ class LocalEnvironmentSpec(EnvironmentSpec):
         default_factory=LocalConfig,
         description="Local execution-specific configuration.",
     )
+
+
+class _ChunkReader:
+    """Reads a pipe one OS-level chunk at a time, decoding incrementally.
+
+    Two problems are solved here:
+
+    * ``subprocess`` with ``text=True`` hands back a ``TextIOWrapper`` whose
+      ``read(n)`` blocks until it has n bytes or reaches EOF. EOF only arrives
+      once *every* process holding the write end has exited, so a backgrounded
+      child that inherited the pipe parks the reader for that child's whole
+      lifetime -- with the output already read but trapped inside the call.
+      Reading a single chunk at a time returns as soon as data is available.
+
+    * Chunk boundaries fall at arbitrary byte offsets, which splits multi-byte
+      characters. An incremental decoder holds the partial sequence back until
+      its remaining bytes arrive, instead of failing or emitting U+FFFD.
+    """
+
+    def __init__(self, pipe: Any) -> None:
+        """Wrap a pipe from ``subprocess.Popen``.
+
+        Args:
+            pipe: The pipe to read from, text-mode or binary.
+        """
+        # Unwrap TextIOWrapper -> binary buffer. With bufsize=0 that is a raw
+        # FileIO whose read() is a single os.read; otherwise a BufferedReader,
+        # where read1() has the same one-syscall behaviour.
+        binary = getattr(pipe, "buffer", pipe)
+        self._read = getattr(binary, "read1", binary.read)
+        encoding = getattr(pipe, "encoding", None) or "utf-8"
+        errors = getattr(pipe, "errors", None) or "replace"
+        self._decoder = codecs.getincrementaldecoder(encoding)(errors)
+        self.at_eof = False
+
+    def read(self, size: int) -> str:
+        """Read at most one chunk.
+
+        Args:
+            size: Maximum number of bytes to read.
+
+        Returns:
+            Decoded text, or "" at end of stream. May also be "" when the
+            chunk held only the leading bytes of a split character; check
+            ``at_eof`` to tell the two apart.
+        """
+        raw = self._read(size)
+        if not raw:
+            self.at_eof = True
+            # Flush any trailing partial sequence as replacement characters.
+            return self._decoder.decode(b"", final=True)
+        if isinstance(raw, str):
+            return raw
+        return self._decoder.decode(raw)
 
 
 class LocalStreamingRuntime(StreamingRuntime):
@@ -146,15 +201,25 @@ class LocalStreamingRuntime(StreamingRuntime):
             Tuples of (stdout_chunk, stderr_chunk)
         """
         sel = selectors.DefaultSelector()
+        readers = {
+            "OUT": _ChunkReader(proc.stdout),
+            "ERR": _ChunkReader(proc.stderr),
+        }
         sel.register(proc.stdout, selectors.EVENT_READ, data="OUT")
         sel.register(proc.stderr, selectors.EVENT_READ, data="ERR")
 
         try:
             while sel.get_map():
                 for key, _ in sel.select():
-                    chunk = key.fileobj.read(8192)
+                    reader = readers[key.data]
+                    # One chunk per wake-up: never block waiting for a full
+                    # buffer, which a backgrounded child could delay forever.
+                    chunk = reader.read(8192)
                     if not chunk:
-                        sel.unregister(key.fileobj)
+                        # Distinguish end-of-stream from a chunk that held
+                        # only the first bytes of a split character.
+                        if reader.at_eof:
+                            sel.unregister(key.fileobj)
                         continue
                     if key.data == "OUT":
                         yield (chunk, "")
