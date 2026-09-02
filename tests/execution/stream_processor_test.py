@@ -9,9 +9,11 @@ import threading
 import time
 from collections.abc import Iterator
 
+from slop_code.execution import stream_processor
 from slop_code.execution.local_streaming import _ChunkReader
 from slop_code.execution.runtime import RuntimeResult
 from slop_code.execution.stream_processor import ensure_string
+from slop_code.execution.stream_processor import make_timeout_fn
 from slop_code.execution.stream_processor import process_stream
 
 
@@ -185,6 +187,55 @@ class TestProcessStreamBackgroundChild:
 
         assert result.stdout.strip() == "started"
         assert elapsed < 30.0
+
+
+class TestNoTimeoutMeansNoDeadline:
+    """``timeout=None`` must impose no deadline whatsoever.
+
+    Agent runs are passed ``timeout=None`` precisely because the harness has
+    no sensible upper bound for them. Silently substituting a default would
+    kill a long run mid-flight and record a truncated result as if it were
+    the agent's own output.
+    """
+
+    def test_make_timeout_fn_never_expires(self) -> None:
+        never = make_timeout_fn(None, time.monotonic() - 10_000_000)
+
+        assert never() > 0
+
+    def test_explicit_timeout_still_counts_down(self) -> None:
+        expired = make_timeout_fn(5.0, time.monotonic() - 10.0)
+
+        assert expired() < 0
+
+    def test_run_outliving_the_default_is_not_killed(
+        self, monkeypatch
+    ) -> None:
+        """A run longer than the fallback constant completes untouched."""
+        monkeypatch.setattr(stream_processor, "DEFAULT_WAIT_TIMEOUT", 0.5)
+
+        proc = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                "import sys, time\n"
+                "for i in range(4):\n"
+                "    sys.stdout.write(f'{i}\\n'); sys.stdout.flush()\n"
+                "    time.sleep(0.4)",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=0,
+        )
+        try:
+            result = drain(_demux(proc), None, proc.poll)
+        finally:
+            proc.kill()
+            proc.wait()
+
+        assert result.timed_out is False
+        assert result.stdout.split() == ["0", "1", "2", "3"]
 
 
 class TestProcessStreamSetupSplit:

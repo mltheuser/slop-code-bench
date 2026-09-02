@@ -199,6 +199,57 @@ class TestWedgedRunDetection:
         assert not finished.is_set()
 
 
+class TestNoHarnessImposedLimits:
+    """The harness must not end a run that momo would let continue.
+
+    Momo self-bounds every run (256 turns, 3-day wall clock, 24h per tool
+    call). Any additional harness-side deadline can only cut a legitimate
+    run short and turn a real result into a truncated one.
+    """
+
+    def test_idle_bound_is_disabled_by_default(self) -> None:
+        config = MomoConfig(
+            type="momo",
+            server_dist=Path("/nonexistent"),
+            harness_path=Path("/nonexistent"),
+            cost_limits=AgentCostLimits(cost_limit=0, net_cost_limit=0),
+        )
+
+        assert config.run_idle_timeout == 0
+
+    def test_shipped_config_imposes_no_limits(self) -> None:
+        """configs/agents/momo.yaml must not reintroduce a bound."""
+        import yaml
+
+        raw = yaml.safe_load(
+            Path("configs/agents/momo.yaml").read_text()
+        )
+        config = MomoConfig(**raw)
+
+        assert config.run_idle_timeout == 0
+        assert config.cost_limits.step_limit == 0
+        assert config.cost_limits.cost_limit == 0
+        assert config.cost_limits.net_cost_limit == 0
+
+    def test_default_agent_polls_indefinitely(self) -> None:
+        """With the shipped defaults a long silent run is not aborted."""
+        runtime = FakeRuntime(default=curl_response({"status": "running"}))
+        agent = make_agent(
+            runtime, poll_interval=0.01, run_idle_timeout=0
+        )
+        finished = threading.Event()
+
+        def poll() -> None:
+            with contextlib.suppress(AgentError):
+                agent._poll_until_run_ends()
+            finished.set()
+
+        threading.Thread(target=poll, daemon=True).start()
+        finished.wait(timeout=1.0)
+
+        assert not finished.is_set()
+
+
 class TestRunOutcomes:
     """Each terminal momo status must map to the right harness outcome."""
 

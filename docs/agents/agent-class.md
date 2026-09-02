@@ -469,6 +469,20 @@ CLI's log stream while it runs, rather than from its final result document.
 A run that is killed or whose output is truncated still needs to be resumable,
 and that is exactly the case where the result document is unavailable.
 
+### Timeouts and run-ending limits
+
+`StreamingRuntime.stream(..., timeout=None)` means **no deadline at all**.
+Agent runs are passed `None` on purpose: the harness has no principled upper
+bound for how long a model may legitimately work, and killing a run mid-flight
+records a truncated result that is indistinguishable from the agent's own
+output. Pass a number only for bounded control-plane calls (a health probe, a
+version check), never for the run itself.
+
+`cost_limits` (`step_limit`, `cost_limit`, `net_cost_limit`) all treat `0` as
+"no limit". Agents whose underlying tool enforces its own budgets should ship
+zeros rather than duplicating the bound in the harness, where it can only
+truncate a run the tool would have allowed to finish.
+
 ### `finish_checkpoint()`
 
 Reset state and accumulate cost:

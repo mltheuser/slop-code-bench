@@ -66,13 +66,13 @@ class MomoConfig(AgentConfigBase, agent_type="momo"):
         ai_router_base_url: ai-router URL as seen from inside the container.
         poll_interval: Seconds between session-status polls during a run.
         startup_timeout: Seconds to wait for the server to become ready.
-        run_idle_timeout: Abort a run that reports ``running`` while writing
-            no new events for this many seconds. This is an inactivity bound,
-            not a total-runtime budget: momo's own wall clock (3 days by
-            default) governs how long legitimate work may take, so bounding
-            total time here would cut healthy long runs short. It exists to
-            catch a wedged run that would otherwise pin a worker forever.
-            0 disables the bound.
+        run_idle_timeout: Opt-in inactivity bound, in seconds. Abort a run
+            that reports ``running`` while writing no events at all for this
+            long. **Disabled (0) by default**: the harness imposes no limits
+            of its own, and momo self-bounds every run (24h per tool call,
+            3-day wall clock), so a genuinely stuck run still ends on its
+            own. Set this only to fail faster than those budgets; any value
+            below momo's 24h tool timeout risks killing legitimate work.
     """
 
     type: Literal["momo"] = "momo"
@@ -82,9 +82,7 @@ class MomoConfig(AgentConfigBase, agent_type="momo"):
     ai_router_base_url: str = "http://host.docker.internal:8787"
     poll_interval: float = 3.0
     startup_timeout: float = 60.0
-    # Generous: a single tool call may legitimately run for a long time
-    # (momo's own tool timeout is 24h) without emitting any event.
-    run_idle_timeout: float = 3600.0
+    run_idle_timeout: float = 0.0
 
 
 class MomoAgent(Agent):

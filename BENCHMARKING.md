@@ -80,12 +80,13 @@ make runs incomparable. Such runs are flagged in
 `<checkpoint>/agent/incomplete_runs.json`; if that file exists, read the
 score as "the agent was cut off", not "the model wrote weak code".
 
-**Wedged runs are abandoned.** `run_idle_timeout` (default 1h, in
-`configs/agents/momo.yaml`) aborts a run that keeps reporting `running`
-while writing no events at all. It is not a runtime budget — any new event
-resets the window, so long tool calls are safe — it only stops a dead run
-from pinning a worker for the rest of the benchmark. Set it to `0` to
-disable.
+**The harness imposes no limits of its own.** No step limit, no cost limit,
+no wall-clock deadline: a run ends when momo's own budgets end it (256
+turns, 3-day wall clock, 24h per tool call). `run_idle_timeout` in
+`configs/agents/momo.yaml` is an opt-in escape hatch for a run that reports
+`running` while emitting no events at all, and ships **disabled (`0`)**.
+Enable it only to fail faster than momo's own budgets; a value below momo's
+24h tool timeout risks killing legitimate work.
 
 **Known gotcha (accepted deliberately, 2026-09-01):** a momo run lives in
 the container and merely gets *observed* by the harness — if the harness

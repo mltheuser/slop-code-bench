@@ -41,6 +41,11 @@ from slop_code.execution.runtime import RuntimeResult
 
 logger = structlog.get_logger(__name__)
 
+# Fallback deadline used only when a caller asks for one without naming it.
+# ``timeout=None`` means *no* deadline (see make_timeout_fn): an agent run has
+# no meaningful upper bound the harness can pick for it, and silently killing
+# one at an arbitrary hour produces a truncated benchmark result rather than a
+# slow one.
 DEFAULT_WAIT_TIMEOUT = 7200.0  # 2 hours
 
 # Idle limit for draining output after the process has exited. This bounds the
@@ -105,7 +110,23 @@ def start_stream_pump(
 def make_timeout_fn(
     timeout: float | None, start_time: float
 ) -> Callable[[], float]:
-    deadline = start_time + (timeout or DEFAULT_WAIT_TIMEOUT)
+    """Build a function returning the seconds left before the deadline.
+
+    Args:
+        timeout: Seconds allowed, or None for no deadline at all.
+        start_time: ``time.monotonic()`` reading when the work started.
+
+    Returns:
+        A callable returning remaining seconds; always positive (never
+        expiring) when ``timeout`` is None.
+    """
+    if timeout is None:
+        # No deadline. Returning a large constant keeps every caller's
+        # "how long may I block?" arithmetic working without special cases,
+        # while never reaching zero.
+        return lambda: DEFAULT_WAIT_TIMEOUT
+
+    deadline = start_time + timeout
 
     def timeout_fn() -> float:
         return deadline - time.monotonic()
